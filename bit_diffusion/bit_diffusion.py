@@ -395,7 +395,8 @@ class BitDiffusion(nn.Module):
         use_ddim = False,
         ddim_eta = 1.,
         noise_schedule = 'cosine',
-        sample_time_delay = 0.
+        sample_time_delay = 0.,
+        bit_scale = 1.
     ):
         super().__init__()
         self.model = model
@@ -409,6 +410,8 @@ class BitDiffusion(nn.Module):
             self.log_snr = alpha_cosine_log_snr
         else:
             raise ValueError(f'invalid noise schedule {noise_schedule}')
+
+        self.bit_scale = bit_scale
 
         self.timesteps = timesteps
         self.use_ddim = use_ddim
@@ -451,7 +454,10 @@ class BitDiffusion(nn.Module):
             # get predicted x0
 
             x_start = self.model(img, noise_cond, x_start)
-            x_start.clamp_(-1., 1.)
+
+            # clip x0
+
+            x_start.clamp_(-self.bit_scale, self.bit_scale)
 
             # get log(snr)
 
@@ -467,10 +473,10 @@ class BitDiffusion(nn.Module):
             # derive posterior mean and variance
 
             c = -expm1(log_snr - log_snr_next)
-            mean = alpha_next * (img * (1 - c) / alpha + c * x_start)
 
+            mean = alpha_next * (img * (1 - c) / alpha + c * x_start)
             variance = (sigma_next ** 2) * c
-            log_variance = log(variance, eps = 1e-20)            
+            log_variance = log(variance)
 
             # get noise
 
@@ -510,28 +516,21 @@ class BitDiffusion(nn.Module):
 
             times_next = F.relu(times_next - self.sample_time_delay)
 
+            # predict x0
+
             x_start = self.model(img, log_snr, x_start)
+
+            # clip x0
+
+            x_start.clamp_(-self.bit_scale, self.bit_scale)
 
             # get predicted noise
 
             pred_noise = (img - alpha * x_start) / sigma.clamp(min = 1e-8)
 
-            # clip x0
+            # calculate x next
 
-            x_start.clamp_(-1., 1.)
-
-            sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
-            c = ((1 - alpha_next) - sigma ** 2).sqrt()
-
-            noise = torch.where(
-                rearrange(times_next > 0, 'b -> b 1 1 1'),
-                torch.randn_like(img),
-                torch.zeros_like(img)
-            )
-
-            img = x_start * alpha_next.sqrt() + \
-                  c * pred_noise + \
-                  sigma * noise
+            img = x_start * alpha_next + pred_noise * sigma_next
 
         return bits_to_decimal(img)
 
@@ -551,7 +550,7 @@ class BitDiffusion(nn.Module):
 
         # convert image to bit representation
 
-        img = decimal_to_bits(img)
+        img = decimal_to_bits(img) * self.bit_scale
 
         # noise sample
 
