@@ -520,8 +520,8 @@ class BitDiffusion(nn.Module):
 
             x_start.clamp_(-1., 1.)
 
-            sigma = eta * ((1 - sigma / sigma_next) * (1 - sigma_next) / (1 - sigma)).sqrt()
-            c = ((1 - sigma_next) - sigma ** 2).sqrt()
+            sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
+            c = ((1 - alpha_next) - sigma ** 2).sqrt()
 
             noise = torch.where(
                 rearrange(times_next > 0, 'b -> b 1 1 1'),
@@ -529,7 +529,7 @@ class BitDiffusion(nn.Module):
                 torch.zeros_like(img)
             )
 
-            img = x_start * sigma_next.sqrt() + \
+            img = x_start * alpha_next.sqrt() + \
                   c * pred_noise + \
                   sigma * noise
 

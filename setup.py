@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'bit-diffusion',
   packages = find_packages(exclude=[]),
-  version = '0.0.6',
+  version = '0.0.7',
   license='MIT',
   description = 'Bit Diffusion - Pytorch',
   author = 'Phil Wang',
