@@ -417,10 +417,10 @@ class BitDiffusion(nn.Module):
         *,
         image_size,
         timesteps = 1000,
-        sampling_timesteps = None,
+        use_ddim = False,
+        ddim_eta = 1.,
         noise_schedule = 'cosine',
-        ddim_sampling_eta = 1.,
-        sample_time_delay = 0.1
+        sample_time_delay = 0.
     ):
         super().__init__()
         self.model = model
@@ -435,11 +435,9 @@ class BitDiffusion(nn.Module):
         else:
             raise ValueError(f'invalid noise schedule {noise_schedule}')
 
-        self.num_timesteps = timesteps
-        self.sampling_timesteps = default(sampling_timesteps, timesteps)
-
-        self.ddim_sampling_eta = ddim_sampling_eta
-        self.is_ddim_sampling = self.sampling_timesteps < self.num_timesteps
+        self.timesteps = timesteps
+        self.use_ddim = use_ddim
+        self.ddim_eta = ddim_eta
 
         # proposed in the paper, summed to time_next
         # as a way to fix a deficiency in self-conditioning and increase FID
@@ -454,7 +452,7 @@ class BitDiffusion(nn.Module):
         return torch.zeros((batch_size,), device = device).float().uniform_(0, max_thres)
 
     def get_sampling_timesteps(self, batch, *, device):
-        times = torch.linspace(1., 0., self.num_timesteps + 1, device = device)
+        times = torch.linspace(1., 0., self.timesteps + 1, device = device)
         times = repeat(times, 't -> b t', b = batch)
         times = torch.stack((times[:, :-1], times[:, 1:]), dim = 0)
         times = times.unbind(dim = -1)
@@ -470,12 +468,13 @@ class BitDiffusion(nn.Module):
         return(x_t - alpha * x_start) / sigma.clamp(min = 1e-8)
 
     def model_predictions(self, x, t, x_self_cond = None):
-        pred_x_start = self.model(x, t, x_self_cond)
+        noise_cond = self.get_condition(t)
+        pred_x_start = self.model(x, noise_cond, x_self_cond)
         pred_noise = self.predict_noise_from_start(x, t, pred_x_start)
         return pred_x_start, pred_noise
 
     def q_posterior(self, x_start, x_t, t, *, t_next = None):
-        t_next = default(t_next, lambda: (t - 1. / self.num_timesteps).clamp(min = 0.))
+        t_next = default(t_next, lambda: (t - 1. / self.timesteps).clamp(min = 0.))
 
         """ https://openreview.net/attachment?id=2LdBqxc1Yv&name=supplementary_material """
         log_snr = self.log_snr(t)
@@ -517,7 +516,7 @@ class BitDiffusion(nn.Module):
     @torch.no_grad()
     def p_sample(self, x, t: int, t_next = None, x_self_cond = None, clip_denoised = True):
         b, *_, device = *x.shape, x.device
-        model_mean, _, model_log_variance, x_start = self.p_mean_variance(x = x, t = t, t_next = t_next, clip_denoised = True)
+        model_mean, _, model_log_variance, x_start = self.p_mean_variance(x = x, t = t, t_next = t_next, clip_denoised = clip_denoised)
         noise = torch.randn_like(x)
         # no noise when t == 0
         is_last_sampling_timestep = t_next == 0
@@ -526,7 +525,7 @@ class BitDiffusion(nn.Module):
         return pred, x_start
 
     @torch.no_grad()
-    def p_sample_loop(self, shape):
+    def ddpm_sample(self, shape):
         batch, device = shape[0], self.device
 
         time_pairs = self.get_sampling_timesteps(batch, device = device)
@@ -535,19 +534,19 @@ class BitDiffusion(nn.Module):
 
         x_start = None
 
-        for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step', total = self.num_timesteps):
+        for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step', total = self.timesteps):
 
             # add the time delay
 
             time_next += self.sample_time_delay
 
-            img, x_start = self.p_sample(img, time, time_next, x_start)
+            img, x_start = self.p_sample(img, time, time_next, x_start, clip_denoised = True)
 
         return bits_to_decimal(img)
 
     @torch.no_grad()
-    def ddim_sample(self, shape, clip_denoised = True):
-        batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], self.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
+    def ddim_sample(self, shape):
+        batch, device, eta = shape[0], self.device, self.ddim_eta
 
         time_pairs = self.get_sampling_timesteps(batch, device = device)
 
@@ -555,28 +554,34 @@ class BitDiffusion(nn.Module):
 
         x_start = None
 
-        for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step'):
-            alpha = self.alphas_cumprod_prev[time]
-            alpha_next = self.alphas_cumprod_prev[time_next]
-
-            # add the time delay
-
-            time_next += self.sample_time_delay
+        for times, times_next in tqdm(time_pairs, desc = 'sampling loop time step'):
 
             # get times and noise levels
 
-            times = torch.full((batch,), time, device = device, dtype = torch.long)
-            log_snrs = self.get_condition(times)
+            log_snr = self.log_snr(times)
+            log_snr_next = self.log_snr(times_next)
 
-            x_start, pred_noise = self.model_predictions(img, log_snrs, x_start)
+            padded_log_snr, padded_log_snr_next = map(partial(right_pad_dims_to, img), (log_snr, log_snr_next))
 
-            if clip_denoised:
-                x_start.clamp_(-1., 1.)
+            _, alpha = log_snr_to_alpha_sigma(padded_log_snr)
+            _, alpha_next = log_snr_to_alpha_sigma(padded_log_snr_next)
+
+            # add the time delay
+
+            times_next += self.sample_time_delay
+
+            x_start, pred_noise = self.model_predictions(img, log_snr, x_start)
+
+            x_start.clamp_(-1., 1.)
 
             sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
             c = ((1 - alpha_next) - sigma ** 2).sqrt()
 
-            noise = torch.randn_like(img) if time_next > 0 else 0.
+            noise = torch.where(
+                rearrange(times_next > 0, 'b -> b 1 1 1'),
+                torch.randn_like(img),
+                torch.zeros_like(img)
+            )
 
             img = x_start * alpha_next.sqrt() + \
                   c * pred_noise + \
@@ -587,7 +592,7 @@ class BitDiffusion(nn.Module):
     @torch.no_grad()
     def sample(self, batch_size = 16):
         image_size, channels = self.image_size, self.channels
-        sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample
+        sample_fn = self.ddpm_sample if not self.use_ddim else self.ddim_sample
         return sample_fn((batch_size, channels, image_size, image_size))
 
     def p_losses(self, x_start, t, noise = None):
@@ -596,7 +601,7 @@ class BitDiffusion(nn.Module):
 
         # noise sample
 
-        x, log_snr = self.q_sample(x_start = x_start, t = t, noise = noise)
+        x, noise_cond = self.q_sample(x_start = x_start, t = t, noise = noise)
 
         # if doing self-conditioning, 50% of the time, predict x_start from current set of times
         # and condition with unet with that
@@ -605,11 +610,11 @@ class BitDiffusion(nn.Module):
         x_self_cond = None
         if random() < 0.5:
             with torch.no_grad():
-                x_self_cond = self.model(x, t).detach_()
+                x_self_cond = self.model(x, noise_cond).detach_()
 
         # predict and take gradient step
 
-        pred_x_start = self.model(x, log_snr, x_self_cond)
+        pred_x_start = self.model(x, noise_cond, x_self_cond)
         return F.mse_loss(pred_x_start, x_start)
 
     def forward(self, img, *args, **kwargs):

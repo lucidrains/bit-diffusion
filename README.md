@@ -26,7 +26,9 @@ model = Unet(
 bit_diffusion = BitDiffusion(
     model,
     image_size = 128,
-    timesteps = 1000
+    timesteps = 100,
+    sample_time_delay = 0.2,     # they found in the paper that at lower number of timesteps, a time delay during sampling of greater than 0 helps FID. as timesteps increases, this time difference can be set to 0 as it does not help
+    use_ddim = True              # use ddim
 ).cuda()
 
 trainer = Trainer(
