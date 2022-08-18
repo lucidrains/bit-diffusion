@@ -394,7 +394,7 @@ class BitDiffusion(nn.Module):
         timesteps = 1000,
         use_ddim = False,
         noise_schedule = 'cosine',
-        sample_time_delay = 0.,
+        time_difference = 0.,
         bit_scale = 1.
     ):
         super().__init__()
@@ -418,7 +418,7 @@ class BitDiffusion(nn.Module):
         # proposed in the paper, summed to time_next
         # as a way to fix a deficiency in self-conditioning and lower FID when the number of sampling timesteps is < 400
 
-        self.sample_time_delay = sample_time_delay
+        self.time_difference = time_difference
 
     @property
     def device(self):
@@ -432,8 +432,10 @@ class BitDiffusion(nn.Module):
         return times
 
     @torch.no_grad()
-    def ddpm_sample(self, shape):
+    def ddpm_sample(self, shape, time_difference = None):
         batch, device = shape[0], self.device
+
+        time_difference = default(time_difference, self.time_difference)
 
         time_pairs = self.get_sampling_timesteps(batch, device = device)
 
@@ -445,7 +447,7 @@ class BitDiffusion(nn.Module):
 
             # add the time delay
 
-            time_next = (time_next - self.sample_time_delay).clamp(min = 0.)
+            time_next = (time_next - self.time_difference).clamp(min = 0.)
 
             noise_cond = self.log_snr(time)
 
@@ -489,8 +491,10 @@ class BitDiffusion(nn.Module):
         return bits_to_decimal(img)
 
     @torch.no_grad()
-    def ddim_sample(self, shape):
+    def ddim_sample(self, shape, time_difference = None):
         batch, device = shape[0], self.device
+
+        time_difference = default(time_difference, self.time_difference)
 
         time_pairs = self.get_sampling_timesteps(batch, device = device)
 
@@ -512,7 +516,7 @@ class BitDiffusion(nn.Module):
 
             # add the time delay
 
-            times_next = (times_next - self.sample_time_delay).clamp(min = 0.)
+            times_next = (times_next - time_difference).clamp(min = 0.)
 
             # predict x0
 

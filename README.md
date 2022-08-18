@@ -27,7 +27,7 @@ bit_diffusion = BitDiffusion(
     model,
     image_size = 128,
     timesteps = 100,
-    sample_time_delay = 0.2,     # they found in the paper that at lower number of timesteps, a time delay during sampling of greater than 0 helps FID. as timesteps increases, this time difference can be set to 0 as it does not help
+    time_difference = 0.1,       # they found in the paper that at lower number of timesteps, a time difference during sampling of greater than 0 helps FID. as timesteps increases, this time difference can be set to 0 as it does not help
     use_ddim = True              # use ddim
 ).cuda()
 
