@@ -423,24 +423,12 @@ class BitDiffusion(nn.Module):
     def device(self):
         return next(self.model.parameters()).device
 
-    def sample_random_times(self, batch_size, max_thres = 0.999, *, device):
-        return torch.zeros((batch_size,), device = device).float().uniform_(0, max_thres)
-
     def get_sampling_timesteps(self, batch, *, device):
         times = torch.linspace(1., 0., self.timesteps + 1, device = device)
         times = repeat(times, 't -> b t', b = batch)
         times = torch.stack((times[:, :-1], times[:, 1:]), dim = 0)
         times = times.unbind(dim = -1)
         return times
-
-    def get_condition(self, times):
-        return self.log_snr(times)
-
-    def predict_noise_from_start(self, x_t, t, x_start):
-        log_snr = self.log_snr(t)
-        log_snr = right_pad_dims_to(x_t, log_snr)
-        alpha, sigma = log_snr_to_alpha_sigma(log_snr)
-        return(x_t - alpha * x_start) / sigma.clamp(min = 1e-8)
 
     @torch.no_grad()
     def ddpm_sample(self, shape):
@@ -458,7 +446,7 @@ class BitDiffusion(nn.Module):
 
             time_next += self.sample_time_delay
 
-            noise_cond = self.get_condition(time)
+            noise_cond = self.log_snr(time)
 
             # get predicted x0
 
@@ -515,22 +503,25 @@ class BitDiffusion(nn.Module):
 
             padded_log_snr, padded_log_snr_next = map(partial(right_pad_dims_to, img), (log_snr, log_snr_next))
 
-            _, alpha = log_snr_to_alpha_sigma(padded_log_snr)
-            _, alpha_next = log_snr_to_alpha_sigma(padded_log_snr_next)
+            alpha, sigma = log_snr_to_alpha_sigma(padded_log_snr)
+            alpha_next, sigma_next = log_snr_to_alpha_sigma(padded_log_snr_next)
 
             # add the time delay
 
             times_next += self.sample_time_delay
 
             x_start = self.model(img, log_snr, x_start)
-            pred_noise = self.predict_noise_from_start(img, times, x_start)
+
+            # get predicted noise
+
+            pred_noise = (img - alpha * x_start) / sigma.clamp(min = 1e-8)
 
             # clip x0
 
             x_start.clamp_(-1., 1.)
 
-            sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
-            c = ((1 - alpha_next) - sigma ** 2).sqrt()
+            sigma = eta * ((1 - sigma / sigma_next) * (1 - sigma_next) / (1 - sigma)).sqrt()
+            c = ((1 - sigma_next) - sigma ** 2).sqrt()
 
             noise = torch.where(
                 rearrange(times_next > 0, 'b -> b 1 1 1'),
@@ -538,7 +529,7 @@ class BitDiffusion(nn.Module):
                 torch.zeros_like(img)
             )
 
-            img = x_start * alpha_next.sqrt() + \
+            img = x_start * sigma_next.sqrt() + \
                   c * pred_noise + \
                   sigma * noise
 
@@ -554,7 +545,12 @@ class BitDiffusion(nn.Module):
         batch, c, h, w, device, img_size, = *img.shape, img.device, self.image_size
         assert h == img_size and w == img_size, f'height and width of image must be {img_size}'
 
-        times = self.sample_random_times(batch, device = device)
+        # sample random times
+
+        times = torch.zeros((batch,), device = device).float().uniform_(0, 0.999)
+
+        # convert image to bit representation
+
         img = decimal_to_bits(img)
 
         # noise sample
