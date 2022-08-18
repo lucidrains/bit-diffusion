@@ -1,6 +1,6 @@
 <img src="./bit-diffusion.png" width="450px"></img>
 
-## Bit Diffusion - Pytorch (wip)
+## Bit Diffusion - Pytorch
 
 Implementation of <a href="https://arxiv.org/abs/2208.04202">Bit Diffusion</a>, Hinton's group's attempt at discrete denoising diffusion, in Pytorch
 
