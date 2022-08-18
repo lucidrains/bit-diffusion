@@ -6,13 +6,14 @@ from multiprocessing import cpu_count
 
 import torch
 from torch import nn, einsum
+from torch.special import expm1
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 from torch.optim import Adam
 from torchvision import transforms as T, utils
 
-from einops import rearrange, reduce
+from einops import rearrange, reduce, repeat
 from einops.layers.torch import Rearrange
 
 from PIL import Image
@@ -391,6 +392,24 @@ def bits_to_decimal(x, bits = BITS):
 
 # bit diffusion class
 
+def log(t, eps = 1e-20):
+    return torch.log(t.clamp(min = eps))
+
+def right_pad_dims_to(x, t):
+    padding_dims = x.ndim - t.ndim
+    if padding_dims <= 0:
+        return t
+    return t.view(*t.shape, *((1,) * padding_dims))
+
+def beta_linear_log_snr(t):
+    return -torch.log(expm1(1e-4 + 10 * (t ** 2)))
+
+def alpha_cosine_log_snr(t, s: float = 0.008):
+    return -log((torch.cos((t + s) / (1 + s) * math.pi * 0.5) ** -2) - 1, eps = 1e-5) # not sure if this accounts for beta being clipped to 0.999 in discrete version
+
+def log_snr_to_alpha_sigma(log_snr):
+    return torch.sqrt(torch.sigmoid(log_snr)), torch.sqrt(torch.sigmoid(-log_snr))
+
 class BitDiffusion(nn.Module):
     def __init__(
         self,
@@ -399,9 +418,9 @@ class BitDiffusion(nn.Module):
         image_size,
         timesteps = 1000,
         sampling_timesteps = None,
-        loss_type = 'l1',
-        beta_schedule = 'cosine',
-        ddim_sampling_eta = 1.
+        noise_schedule = 'cosine',
+        ddim_sampling_eta = 1.,
+        sample_time_delay = 0.1
     ):
         super().__init__()
         self.model = model
@@ -409,117 +428,128 @@ class BitDiffusion(nn.Module):
 
         self.image_size = image_size
 
-        if beta_schedule == 'linear':
-            betas = linear_beta_schedule(timesteps)
-        elif beta_schedule == 'cosine':
-            betas = cosine_beta_schedule(timesteps)
+        if noise_schedule == "linear":
+            self.log_snr = beta_linear_log_snr
+        elif noise_schedule == "cosine":
+            self.log_snr = alpha_cosine_log_snr
         else:
-            raise ValueError(f'unknown beta schedule {beta_schedule}')
+            raise ValueError(f'invalid noise schedule {noise_schedule}')
 
-        alphas = 1. - betas
-        alphas_cumprod = torch.cumprod(alphas, axis=0)
-        alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value = 1.)
+        self.num_timesteps = timesteps
+        self.sampling_timesteps = default(sampling_timesteps, timesteps)
 
-        timesteps, = betas.shape
-        self.num_timesteps = int(timesteps)
-        self.loss_type = loss_type
-
-        # sampling related parameters
-
-        self.sampling_timesteps = default(sampling_timesteps, timesteps) # default num sampling timesteps to number of timesteps at training
-
-        assert self.sampling_timesteps <= timesteps
-        self.is_ddim_sampling = self.sampling_timesteps < timesteps
         self.ddim_sampling_eta = ddim_sampling_eta
+        self.is_ddim_sampling = self.sampling_timesteps < self.num_timesteps
 
-        # helper function to register buffer from float64 to float32
+        # proposed in the paper, summed to time_next
+        # as a way to fix a deficiency in self-conditioning and increase FID
 
-        register_buffer = lambda name, val: self.register_buffer(name, val.to(torch.float32))
+        self.sample_time_delay = sample_time_delay
 
-        register_buffer('betas', betas)
-        register_buffer('alphas_cumprod', alphas_cumprod)
-        register_buffer('alphas_cumprod_prev', alphas_cumprod_prev)
+    @property
+    def device(self):
+        return next(self.model.parameters()).device
 
-        # calculations for diffusion q(x_t | x_{t-1}) and others
+    def sample_random_times(self, batch_size, max_thres = 0.999, *, device):
+        return torch.zeros((batch_size,), device = device).float().uniform_(0, max_thres)
 
-        register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
-        register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1. - alphas_cumprod))
-        register_buffer('log_one_minus_alphas_cumprod', torch.log(1. - alphas_cumprod))
-        register_buffer('sqrt_recip_alphas_cumprod', torch.sqrt(1. / alphas_cumprod))
-        register_buffer('sqrt_recipm1_alphas_cumprod', torch.sqrt(1. / alphas_cumprod - 1))
+    def get_sampling_timesteps(self, batch, *, device):
+        times = torch.linspace(1., 0., self.num_timesteps + 1, device = device)
+        times = repeat(times, 't -> b t', b = batch)
+        times = torch.stack((times[:, :-1], times[:, 1:]), dim = 0)
+        times = times.unbind(dim = -1)
+        return times
 
-        # calculations for posterior q(x_{t-1} | x_t, x_0)
+    def get_condition(self, times):
+        return self.log_snr(times)
 
-        posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
-
-        # above: equal to 1. / (1. / (1. - alpha_cumprod_tm1) + alpha_t / beta_t)
-
-        register_buffer('posterior_variance', posterior_variance)
-
-        # below: log calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
-
-        register_buffer('posterior_log_variance_clipped', torch.log(posterior_variance.clamp(min =1e-20)))
-        register_buffer('posterior_mean_coef1', betas * torch.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod))
-        register_buffer('posterior_mean_coef2', (1. - alphas_cumprod_prev) * torch.sqrt(alphas) / (1. - alphas_cumprod))
-
-    def predict_noise_from_start(self, x_t, t, x0):
-        return (
-            (extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - x0) / \
-            extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
-        )
-
-    def q_posterior(self, x_start, x_t, t):
-        posterior_mean = (
-            extract(self.posterior_mean_coef1, t, x_t.shape) * x_start +
-            extract(self.posterior_mean_coef2, t, x_t.shape) * x_t
-        )
-        posterior_variance = extract(self.posterior_variance, t, x_t.shape)
-        posterior_log_variance_clipped = extract(self.posterior_log_variance_clipped, t, x_t.shape)
-        return posterior_mean, posterior_variance, posterior_log_variance_clipped
+    def predict_noise_from_start(self, x_t, t, x_start):
+        log_snr = self.log_snr(t)
+        log_snr = right_pad_dims_to(x_t, log_snr)
+        alpha, sigma = log_snr_to_alpha_sigma(log_snr)
+        return(x_t - alpha * x_start) / sigma.clamp(min = 1e-8)
 
     def model_predictions(self, x, t, x_self_cond = None):
         pred_x_start = self.model(x, t, x_self_cond)
         pred_noise = self.predict_noise_from_start(x, t, pred_x_start)
         return pred_x_start, pred_noise
 
-    def p_mean_variance(self, x, t, x_self_cond = None, clip_denoised = True):
+    def q_posterior(self, x_start, x_t, t, *, t_next = None):
+        t_next = default(t_next, lambda: (t - 1. / self.num_timesteps).clamp(min = 0.))
+
+        """ https://openreview.net/attachment?id=2LdBqxc1Yv&name=supplementary_material """
+        log_snr = self.log_snr(t)
+        log_snr_next = self.log_snr(t_next)
+        log_snr, log_snr_next = map(partial(right_pad_dims_to, x_t), (log_snr, log_snr_next))
+
+        alpha, sigma = log_snr_to_alpha_sigma(log_snr)
+        alpha_next, sigma_next = log_snr_to_alpha_sigma(log_snr_next)
+
+        # c - as defined near eq 33
+        c = -expm1(log_snr - log_snr_next)
+        posterior_mean = alpha_next * (x_t * (1 - c) / alpha + c * x_start)
+
+        # following (eq. 33)
+        posterior_variance = (sigma_next ** 2) * c
+        posterior_log_variance_clipped = log(posterior_variance, eps = 1e-20)
+        return posterior_mean, posterior_variance, posterior_log_variance_clipped
+
+    def q_sample(self, x_start, t, noise = None):
+        if isinstance(t, float):
+            batch = x_start.shape[0]
+            t = torch.full((batch,), t, device = x_start.device, dtype = x_start.dtype)
+
+        noise = default(noise, lambda: torch.randn_like(x_start))
+        log_snr = self.log_snr(t)
+        log_snr_padded_dim = right_pad_dims_to(x_start, log_snr)
+        alpha, sigma =  log_snr_to_alpha_sigma(log_snr_padded_dim)
+        return alpha * x_start + sigma * noise, log_snr
+
+    def p_mean_variance(self, x, t, t_next = None, x_self_cond = None, clip_denoised = True):
         x_start, pred_noise = self.model_predictions(x, t, x_self_cond)
 
         if clip_denoised:
             x_start.clamp_(-1., 1.)
 
-        model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start = x_start, x_t = x, t = t)
+        model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start = x_start, x_t = x, t = t, t_next = t_next)
         return model_mean, posterior_variance, posterior_log_variance, x_start
 
     @torch.no_grad()
-    def p_sample(self, x, t: int, x_self_cond = None, clip_denoised = True):
+    def p_sample(self, x, t: int, t_next = None, x_self_cond = None, clip_denoised = True):
         b, *_, device = *x.shape, x.device
-        batched_times = torch.full((x.shape[0],), t, device = x.device, dtype = torch.long)
-        model_mean, _, model_log_variance, x_start = self.p_mean_variance(x = x, t = batched_times, x_self_cond = x_self_cond, clip_denoised = clip_denoised)
-        noise = torch.randn_like(x) if t > 0 else 0. # no noise if t == 0
-        pred_img = model_mean + (0.5 * model_log_variance).exp() * noise
-        return pred_img, x_start
+        model_mean, _, model_log_variance, x_start = self.p_mean_variance(x = x, t = t, t_next = t_next, clip_denoised = True)
+        noise = torch.randn_like(x)
+        # no noise when t == 0
+        is_last_sampling_timestep = t_next == 0
+        nonzero_mask = (1 - is_last_sampling_timestep.float()).reshape(b, *((1,) * (len(x.shape) - 1)))
+        pred = model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
+        return pred, x_start
 
     @torch.no_grad()
     def p_sample_loop(self, shape):
-        batch, device = shape[0], self.betas.device
+        batch, device = shape[0], self.device
+
+        time_pairs = self.get_sampling_timesteps(batch, device = device)
 
         img = torch.randn(shape, device=device)
 
         x_start = None
 
-        for t in tqdm(reversed(range(0, self.num_timesteps)), desc = 'sampling loop time step', total = self.num_timesteps):
-            img, x_start = self.p_sample(img, t, x_start)
+        for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step', total = self.num_timesteps):
+
+            # add the time delay
+
+            time_next += self.sample_time_delay
+
+            img, x_start = self.p_sample(img, time, time_next, x_start)
 
         return bits_to_decimal(img)
 
     @torch.no_grad()
     def ddim_sample(self, shape, clip_denoised = True):
-        batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], self.betas.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
+        batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], self.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
 
-        times = torch.linspace(0., total_timesteps, steps = sampling_timesteps + 2)[:-1]
-        times = list(reversed(times.int().tolist()))
-        time_pairs = list(zip(times[:-1], times[1:]))
+        time_pairs = self.get_sampling_timesteps(batch, device = device)
 
         img = torch.randn(shape, device = device)
 
@@ -529,9 +559,16 @@ class BitDiffusion(nn.Module):
             alpha = self.alphas_cumprod_prev[time]
             alpha_next = self.alphas_cumprod_prev[time_next]
 
-            time_cond = torch.full((batch,), time, device = device, dtype = torch.long)
+            # add the time delay
 
-            x_start, pred_noise = self.model_predictions(img, time_cond, x_start)
+            time_next += self.sample_time_delay
+
+            # get times and noise levels
+
+            times = torch.full((batch,), time, device = device, dtype = torch.long)
+            log_snrs = self.get_condition(times)
+
+            x_start, pred_noise = self.model_predictions(img, log_snrs, x_start)
 
             if clip_denoised:
                 x_start.clamp_(-1., 1.)
@@ -553,30 +590,13 @@ class BitDiffusion(nn.Module):
         sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample
         return sample_fn((batch_size, channels, image_size, image_size))
 
-    def q_sample(self, x_start, t, noise=None):
-        noise = default(noise, lambda: torch.randn_like(x_start))
-
-        return (
-            extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
-            extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
-        )
-
-    @property
-    def loss_fn(self):
-        if self.loss_type == 'l1':
-            return F.l1_loss
-        elif self.loss_type == 'l2':
-            return F.mse_loss
-        else:
-            raise ValueError(f'invalid loss type {self.loss_type}')
-
     def p_losses(self, x_start, t, noise = None):
         b, c, h, w = x_start.shape
         noise = default(noise, lambda: torch.randn_like(x_start))
 
         # noise sample
 
-        x = self.q_sample(x_start = x_start, t = t, noise = noise)
+        x, log_snr = self.q_sample(x_start = x_start, t = t, noise = noise)
 
         # if doing self-conditioning, 50% of the time, predict x_start from current set of times
         # and condition with unet with that
@@ -589,18 +609,16 @@ class BitDiffusion(nn.Module):
 
         # predict and take gradient step
 
-        model_out = self.model(x, t, x_self_cond)
-        target = x_start
-
-        loss = self.loss_fn(model_out, target)
-        return loss
+        pred_x_start = self.model(x, log_snr, x_self_cond)
+        return F.mse_loss(pred_x_start, x_start)
 
     def forward(self, img, *args, **kwargs):
         b, c, h, w, device, img_size, = *img.shape, img.device, self.image_size
         assert h == img_size and w == img_size, f'height and width of image must be {img_size}'
-        t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
 
+        t = self.sample_random_times(b, device = device)
         img = decimal_to_bits(img)
+
         return self.p_losses(img, t, *args, **kwargs)
 
 # dataset classes
