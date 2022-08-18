@@ -444,7 +444,7 @@ class BitDiffusion(nn.Module):
 
             # add the time delay
 
-            time_next += self.sample_time_delay
+            time_next = F.relu(time_next - self.sample_time_delay)
 
             noise_cond = self.log_snr(time)
 
@@ -508,7 +508,7 @@ class BitDiffusion(nn.Module):
 
             # add the time delay
 
-            times_next += self.sample_time_delay
+            times_next = F.relu(times_next - self.sample_time_delay)
 
             x_start = self.model(img, log_snr, x_start)
 
