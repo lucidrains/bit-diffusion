@@ -442,26 +442,6 @@ class BitDiffusion(nn.Module):
         alpha, sigma = log_snr_to_alpha_sigma(log_snr)
         return(x_t - alpha * x_start) / sigma.clamp(min = 1e-8)
 
-    def q_posterior(self, x_start, x_t, t, *, t_next = None):
-        t_next = default(t_next, lambda: (t - 1. / self.timesteps).clamp(min = 0.))
-
-        """ https://openreview.net/attachment?id=2LdBqxc1Yv&name=supplementary_material """
-        log_snr = self.log_snr(t)
-        log_snr_next = self.log_snr(t_next)
-        log_snr, log_snr_next = map(partial(right_pad_dims_to, x_t), (log_snr, log_snr_next))
-
-        alpha, sigma = log_snr_to_alpha_sigma(log_snr)
-        alpha_next, sigma_next = log_snr_to_alpha_sigma(log_snr_next)
-
-        # c - as defined near eq 33
-        c = -expm1(log_snr - log_snr_next)
-        posterior_mean = alpha_next * (x_t * (1 - c) / alpha + c * x_start)
-
-        # following (eq. 33)
-        posterior_variance = (sigma_next ** 2) * c
-        posterior_log_variance_clipped = log(posterior_variance, eps = 1e-20)
-        return posterior_mean, posterior_variance, posterior_log_variance_clipped
-
     @torch.no_grad()
     def ddpm_sample(self, shape):
         batch, device = shape[0], self.device
@@ -480,10 +460,31 @@ class BitDiffusion(nn.Module):
 
             noise_cond = self.get_condition(time)
 
+            # get predicted x0
+
             x_start = self.model(img, noise_cond, x_start)
             x_start.clamp_(-1., 1.)
 
-            model_mean, _, posterior_log_variance = self.q_posterior(x_start = x_start, x_t = img, t = time, t_next = time_next)
+            # get log(snr)
+
+            log_snr = self.log_snr(time)
+            log_snr_next = self.log_snr(time_next)
+            log_snr, log_snr_next = map(partial(right_pad_dims_to, img), (log_snr, log_snr_next))
+
+            # get alpha sigma of time and next time
+
+            alpha, sigma = log_snr_to_alpha_sigma(log_snr)
+            alpha_next, sigma_next = log_snr_to_alpha_sigma(log_snr_next)
+
+            # derive posterior mean and variance
+
+            c = -expm1(log_snr - log_snr_next)
+            mean = alpha_next * (img * (1 - c) / alpha + c * x_start)
+
+            variance = (sigma_next ** 2) * c
+            log_variance = log(variance, eps = 1e-20)            
+
+            # get noise
 
             noise = torch.where(
                 rearrange(time_next > 0, 'b -> b 1 1 1'),
@@ -491,7 +492,7 @@ class BitDiffusion(nn.Module):
                 torch.zeros_like(img)
             )
 
-            img = model_mean + (0.5 * posterior_log_variance).exp() * noise
+            img = mean + (0.5 * log_variance).exp() * noise
 
         return bits_to_decimal(img)
 
