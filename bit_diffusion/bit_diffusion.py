@@ -462,17 +462,6 @@ class BitDiffusion(nn.Module):
         posterior_log_variance_clipped = log(posterior_variance, eps = 1e-20)
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
-    def q_sample(self, x_start, t, noise = None):
-        if isinstance(t, float):
-            batch = x_start.shape[0]
-            t = torch.full((batch,), t, device = x_start.device, dtype = x_start.dtype)
-
-        noise = default(noise, lambda: torch.randn_like(x_start))
-        log_snr = self.log_snr(t)
-        log_snr_padded_dim = right_pad_dims_to(x_start, log_snr)
-        alpha, sigma =  log_snr_to_alpha_sigma(log_snr_padded_dim)
-        return alpha * x_start + sigma * noise, log_snr
-
     @torch.no_grad()
     def ddpm_sample(self, shape):
         batch, device = shape[0], self.device
@@ -569,7 +558,13 @@ class BitDiffusion(nn.Module):
 
         # noise sample
 
-        noised_img, noise_cond = self.q_sample(x_start = img, t = times)
+        noise = torch.randn_like(img)
+
+        noise_level = self.log_snr(times)
+        padded_noise_level = right_pad_dims_to(img, noise_level)
+        alpha, sigma =  log_snr_to_alpha_sigma(padded_noise_level)
+
+        noised_img = alpha * img + sigma * noise
 
         # if doing self-conditioning, 50% of the time, predict x_start from current set of times
         # and condition with unet with that
@@ -578,11 +573,11 @@ class BitDiffusion(nn.Module):
         self_cond = None
         if random() < 0.5:
             with torch.no_grad():
-                self_cond = self.model(noised_img, noise_cond).detach_()
+                self_cond = self.model(noised_img, noise_level).detach_()
 
         # predict and take gradient step
 
-        pred = self.model(noised_img, noise_cond, self_cond)
+        pred = self.model(noised_img, noise_level, self_cond)
 
         return F.mse_loss(pred, img)
 
