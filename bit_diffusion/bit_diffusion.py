@@ -393,7 +393,6 @@ class BitDiffusion(nn.Module):
         image_size,
         timesteps = 1000,
         use_ddim = False,
-        ddim_eta = 1.,
         noise_schedule = 'cosine',
         sample_time_delay = 0.,
         bit_scale = 1.
@@ -415,7 +414,6 @@ class BitDiffusion(nn.Module):
 
         self.timesteps = timesteps
         self.use_ddim = use_ddim
-        self.ddim_eta = ddim_eta
 
         # proposed in the paper, summed to time_next
         # as a way to fix a deficiency in self-conditioning and lower FID when the number of sampling timesteps is < 400
@@ -492,7 +490,7 @@ class BitDiffusion(nn.Module):
 
     @torch.no_grad()
     def ddim_sample(self, shape):
-        batch, device, eta = shape[0], self.device, self.ddim_eta
+        batch, device = shape[0], self.device
 
         time_pairs = self.get_sampling_timesteps(batch, device = device)
 
