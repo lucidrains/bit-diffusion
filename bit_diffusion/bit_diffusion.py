@@ -368,7 +368,7 @@ def decimal_to_bits(x, bits = BITS):
     """ expects image tensor ranging from 0 to 1, outputs bit tensor ranging from -1 to 1 """
     device = x.device
 
-    x = (x * 255).int()
+    x = (x * 255).int().clamp(0, 255)
 
     mask = 2 ** torch.arange(bits - 1, -1, -1, device = device)
     mask = rearrange(mask, 'd -> d 1 1')
@@ -389,7 +389,7 @@ def bits_to_decimal(x, bits = BITS):
     mask = rearrange(mask, 'd -> d 1 1')
     x = rearrange(x, 'b (c d) h w -> b c d h w', d = 8)
     dec = reduce(x * mask, 'b c d h w -> b c h w', 'sum')
-    return dec / 255
+    return (dec / 255).clamp(0., 1.)
 
 # bit diffusion class
 
