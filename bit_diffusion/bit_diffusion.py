@@ -445,7 +445,7 @@ class BitDiffusion(nn.Module):
 
             # add the time delay
 
-            time_next = F.relu(time_next - self.sample_time_delay)
+            time_next = (time_next - self.sample_time_delay).clamp(min = 0.)
 
             noise_cond = self.log_snr(time)
 
@@ -512,7 +512,7 @@ class BitDiffusion(nn.Module):
 
             # add the time delay
 
-            times_next = F.relu(times_next - self.sample_time_delay)
+            times_next = (times_next - self.sample_time_delay).clamp(min = 0.)
 
             # predict x0
 
