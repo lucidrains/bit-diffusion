@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'bit-diffusion',
   packages = find_packages(exclude=[]),
-  version = '0.0.11',
+  version = '0.0.12',
   license='MIT',
   description = 'Bit Diffusion - Pytorch',
   author = 'Phil Wang',
@@ -20,7 +20,7 @@ setup(
     'einops',
     'ema-pytorch',
     'pillow',
-    'torch',
+    'torch>=1.12.0',
     'torchvision',
     'tqdm'
   ],
