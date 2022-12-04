@@ -545,7 +545,7 @@ class BitDiffusion(nn.Module):
 
         # sample random times
 
-        times = torch.zeros((batch,), device = device).float().uniform_(0, 0.999)
+        times = torch.zeros((batch,), device = device).float().uniform_(0, 1.)
 
         # convert image to bit representation
 
