@@ -52,9 +52,9 @@ def num_to_groups(num, divisor):
         arr.append(remainder)
     return arr
 
-def convert_image_to(img_type, image):
-    if image.mode != img_type:
-        return image.convert(img_type)
+def convert_image_to(pil_img_type, image):
+    if image.mode != pil_img_type:
+        return image.convert(pil_img_type)
     return image
 
 # small helper modules
@@ -585,14 +585,14 @@ class Dataset(Dataset):
         image_size,
         exts = ['jpg', 'jpeg', 'png', 'tiff'],
         augment_horizontal_flip = False,
-        convert_image_to = None
+        pil_img_type = None
     ):
         super().__init__()
         self.folder = folder
         self.image_size = image_size
         self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
 
-        maybe_convert_fn = partial(convert_image_to, convert_image_to) if exists(convert_image_to) else nn.Identity()
+        maybe_convert_fn = partial(convert_image_to, pil_img_type) if exists(pil_img_type) else nn.Identity()
 
         self.transform = T.Compose([
             T.Lambda(maybe_convert_fn),
@@ -632,7 +632,7 @@ class Trainer(object):
         amp = False,
         fp16 = False,
         split_batches = True,
-        convert_image_to = None
+        pil_img_type = None
     ):
         super().__init__()
 
@@ -657,7 +657,7 @@ class Trainer(object):
 
         # dataset and dataloader
 
-        self.ds = Dataset(folder, self.image_size, augment_horizontal_flip = augment_horizontal_flip, convert_image_to = convert_image_to)
+        self.ds = Dataset(folder, self.image_size, augment_horizontal_flip = augment_horizontal_flip, convert_image_to = pil_img_type)
         dl = DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = cpu_count())
 
         dl = self.accelerator.prepare(dl)
