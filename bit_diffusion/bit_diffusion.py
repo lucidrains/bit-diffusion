@@ -358,7 +358,7 @@ def bits_to_decimal(x, bits = BITS):
     mask = 2 ** torch.arange(bits - 1, -1, -1, device = device, dtype = torch.int32)
 
     mask = rearrange(mask, 'd -> d 1 1')
-    x = rearrange(x, 'b (c d) h w -> b c d h w', d = 8)
+    x = rearrange(x, 'b (c d) h w -> b c d h w', d = bits)
     dec = reduce(x * mask, 'b c d h w -> b c h w', 'sum')
     return (dec / 255).clamp(0., 1.)
 
