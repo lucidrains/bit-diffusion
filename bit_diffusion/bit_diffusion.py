@@ -1,6 +1,5 @@
 import math
 from pathlib import Path
-from random import random
 from functools import partial
 from multiprocessing import cpu_count
 
@@ -566,9 +565,9 @@ class BitDiffusion(nn.Module):
         # this technique will slow down training by 25%, but seems to lower FID significantly
 
         self_cond = None
-        if random() < 0.5:
+        if torch.rand((1)) < 0.5:
             with torch.no_grad():
-                self_cond = self.model(noised_img, noise_level).detach_()
+                self_cond = self.model(noised_img, noise_level).detach_().float()
 
         # predict and take gradient step
 
@@ -585,13 +584,14 @@ class Dataset(Dataset):
         image_size,
         exts = ['jpg', 'jpeg', 'png', 'tiff'],
         augment_horizontal_flip = False,
-        pil_img_type = None
+        pil_img_type = None,
+        translate_to_bit_dim = True
     ):
         super().__init__()
         self.folder = folder
         self.image_size = image_size
         self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
-
+        self.translate_to_bit_dim = translate_to_bit_dim
         maybe_convert_fn = partial(convert_image_to, pil_img_type) if exists(pil_img_type) else nn.Identity()
 
         self.transform = T.Compose([
@@ -608,6 +608,8 @@ class Dataset(Dataset):
     def __getitem__(self, index):
         path = self.paths[index]
         img = Image.open(path)
+        if self.translate_to_bit_dim:
+            img = decimal_to_bits(img)
         return self.transform(img)
 
 # trainer class
