@@ -1,6 +1,5 @@
 import math
 from pathlib import Path
-from random import random
 from functools import partial
 from multiprocessing import cpu_count
 
@@ -358,7 +357,7 @@ def bits_to_decimal(x, bits = BITS):
     mask = 2 ** torch.arange(bits - 1, -1, -1, device = device, dtype = torch.int32)
 
     mask = rearrange(mask, 'd -> d 1 1')
-    x = rearrange(x, 'b (c d) h w -> b c d h w', d = 8)
+    x = rearrange(x, 'b (c d) h w -> b c d h w', d = bits)
     dec = reduce(x * mask, 'b c d h w -> b c h w', 'sum')
     return (dec / 255).clamp(0., 1.)
 
@@ -566,7 +565,7 @@ class BitDiffusion(nn.Module):
         # this technique will slow down training by 25%, but seems to lower FID significantly
 
         self_cond = None
-        if random() < 0.5:
+        if torch.rand((1)) < 0.5:
             with torch.no_grad():
                 self_cond = self.model(noised_img, noise_level).detach_()
 
@@ -591,7 +590,6 @@ class Dataset(Dataset):
         self.folder = folder
         self.image_size = image_size
         self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
-
         maybe_convert_fn = partial(convert_image_to, pil_img_type) if exists(pil_img_type) else nn.Identity()
 
         self.transform = T.Compose([
