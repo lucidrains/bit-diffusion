@@ -567,7 +567,7 @@ class BitDiffusion(nn.Module):
         self_cond = None
         if torch.rand((1)) < 0.5:
             with torch.no_grad():
-                self_cond = self.model(noised_img, noise_level).detach_().float()
+                self_cond = self.model(noised_img, noise_level).detach_()
 
         # predict and take gradient step
 
