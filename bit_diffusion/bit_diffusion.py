@@ -584,14 +584,12 @@ class Dataset(Dataset):
         image_size,
         exts = ['jpg', 'jpeg', 'png', 'tiff'],
         augment_horizontal_flip = False,
-        pil_img_type = None,
-        translate_to_bit_dim = True
+        pil_img_type = None
     ):
         super().__init__()
         self.folder = folder
         self.image_size = image_size
         self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
-        self.translate_to_bit_dim = translate_to_bit_dim
         maybe_convert_fn = partial(convert_image_to, pil_img_type) if exists(pil_img_type) else nn.Identity()
 
         self.transform = T.Compose([
@@ -608,8 +606,6 @@ class Dataset(Dataset):
     def __getitem__(self, index):
         path = self.paths[index]
         img = Image.open(path)
-        if self.translate_to_bit_dim:
-            img = decimal_to_bits(img)
         return self.transform(img)
 
 # trainer class

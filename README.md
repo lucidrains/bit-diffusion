@@ -53,7 +53,7 @@ If you would like to experiment with the `Unet` and `BitDiffusion` class outside
 
 ```python
 import torch
-from bit_diffusion import Unet, BitDiffusion, bits_to_decimal, decimal_to_bits
+from bit_diffusion import Unet, BitDiffusion
 
 model = Unet(
     dim = 64,
@@ -67,13 +67,11 @@ bit_diffusion = BitDiffusion(
 )
 
 training_images = torch.randn(8, 3, 128, 128) # images are normalized from 0 to 1
-training_images = bits_to_decimal(training_images)
 loss = bit_diffusion(training_images)
 loss.backward()
 # after a lot of training
 
 sampled_images = bit_diffusion.sample(batch_size = 4)
-sampled_images = bits_to_decimal(sampled_images)
 sampled_images.shape # (4, 3, 128, 128)
 ```
 
