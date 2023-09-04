@@ -628,7 +628,7 @@ class Trainer(object):
         num_samples = 25,
         results_folder = './results',
         amp = False,
-        fp16 = False,
+        mixed_precision_type = 'fp16',
         split_batches = True,
         pil_img_type = None
     ):
@@ -636,10 +636,8 @@ class Trainer(object):
 
         self.accelerator = Accelerator(
             split_batches = split_batches,
-            mixed_precision = 'fp16' if fp16 else 'no'
+            mixed_precision = mixed_precision_type if amp else 'no'
         )
-
-        self.accelerator.native_amp = amp
 
         self.model = diffusion_model
 
