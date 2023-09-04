@@ -500,6 +500,10 @@ class BitDiffusion(nn.Module):
 
         for times, times_next in tqdm(time_pairs, desc = 'sampling loop time step'):
 
+            # add the time delay
+
+            times_next = (times_next - time_difference).clamp(min = 0.)
+
             # get times and noise levels
 
             log_snr = self.log_snr(times)
@@ -509,10 +513,6 @@ class BitDiffusion(nn.Module):
 
             alpha, sigma = log_snr_to_alpha_sigma(padded_log_snr)
             alpha_next, sigma_next = log_snr_to_alpha_sigma(padded_log_snr_next)
-
-            # add the time delay
-
-            times_next = (times_next - time_difference).clamp(min = 0.)
 
             # predict x0
 
